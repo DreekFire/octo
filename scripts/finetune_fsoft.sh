@@ -1,0 +1,1 @@
+python octo/scripts/finetune_fsoft.py --dataset-cfg.dataset-json /nfs/nfs2/users/derekguo/code/droid_loading/config/dataset_config.json --logging-cfg.output-dir /nfs/nfs2/users/derekguo/experiment_output/fsoft_octo --shared-cfg.batch-size 4 --shared-cfg.num-pred-steps 1

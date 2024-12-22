@@ -89,6 +89,8 @@ class OctoTransformer(nn.Module):
         tasks: Data,
         pad_mask: jax.Array,
         readouts: Optional[Sequence[str]] = None,
+        # restart_position_keys: Optional[Sequence[str]] = None
+        # num_tokens: Optional[int] = None
         train: bool = False,
         verbose: bool = False,
     ) -> Dict[str, TokenGroup]:
@@ -121,6 +123,7 @@ class OctoTransformer(nn.Module):
             set(self.readouts.keys())
         ), "readouts must be specified in the model config"
 
+        # breakpoint()
         batch_size, horizon = jax.tree_util.tree_leaves(observations)[0].shape[:2]
         assert horizon <= self.max_horizon, "horizon must be <= max_horizon"
         assert jax.tree_util.tree_all(
@@ -157,6 +160,7 @@ class OctoTransformer(nn.Module):
             group_name = f"task_{name}"
             # Receive inputs from tokenizer and cast to embedding size
             tokenizer_output: TokenGroup = tok(observations, tasks, train=train)
+            # breakpoint() # check output of tokenizers
             if tokenizer_output is None:
                 logging.warning(f"Skipping task tokenizer: {group_name}")
                 continue
@@ -186,6 +190,7 @@ class OctoTransformer(nn.Module):
             group_name = f"obs_{name}"
             # Receive inputs from tokenizer and cast to embedding size
             tokenizer_output: TokenGroup = tok(observations, tasks, train=train)
+            # breakpoint()
             if tokenizer_output is None:
                 logging.warning(f"Skipping observation tokenizer: {group_name}")
                 continue
@@ -271,24 +276,25 @@ class OctoTransformer(nn.Module):
                 [TokenGroup(group.tokens, group.mask) for group in prefix_outputs]
             )
 
-        outputs["obs"] = TokenGroup.concatenate(
-            [
-                TokenGroup(group.tokens, group.mask)
-                for group in timestep_outputs
-                if group.name.startswith("obs_")
-            ],
-            axis=-2,
-        )
+        if sum(1 for group in timestep_outputs if group.name.startswith("obs_")) > 0:
+            outputs["obs"] = TokenGroup.concatenate(
+                [
+                    TokenGroup(group.tokens, group.mask)
+                    for group in timestep_outputs
+                    if group.name.startswith("obs_")
+                ],
+                axis=-2,
+            )
 
         return outputs
 
-    def _create_positional_embedding(self, name: str, tokens: jax.Array):
+    def _create_positional_embedding(self, name: str, tokens: jax.Array): #, position_override: Optional[jax.Array]=None):
         if tokens.ndim == 3:  # for prefixes
             shape = (1, *tokens.shape[-2:])
         elif (
-            tokens.ndim == 4
+            tokens.ndim > 3
         ):  # for timesteps, create embedding for max_horizon, then truncate
-            shape = (1, self.max_horizon, *tokens.shape[-2:])
+            shape = (1,) * (tokens.ndim - 3) + (self.max_horizon, *tokens.shape[-2:])
         else:
             raise ValueError(f"Invalid tokens shape: {tokens.shape}")
 
@@ -299,7 +305,10 @@ class OctoTransformer(nn.Module):
         )
         if tokens.ndim == 4:
             # Use only the timesteps we receive as input
-            embedding = embedding[:, : tokens.shape[1]]
+            # if position_override is None:
+            embedding = embedding[:, :tokens.shape[1]]
+            # else:
+            #     embedding = embedding[:, position_override]
         return jnp.broadcast_to(embedding, tokens.shape)
 
 
@@ -330,10 +339,25 @@ class OctoModule(nn.Module):
         transformer_outputs = self.octo_transformer(
             observations, tasks, pad_mask, train=train, verbose=verbose
         )
+        # breakpoint()
         head_outputs = {}
         for head_name, head in self.heads.items():
             head_outputs[head_name] = head(transformer_outputs, train=train)
         return transformer_outputs, head_outputs
+
+    def loss(self, transformer_outputs, targets, pad_mask, train=True):
+        loss = 0
+        metrics = {}
+        for head_key in self.heads.keys():
+            head_loss, head_metrics = self.heads[head_key].loss(
+                transformer_outputs, # Action head knows to pull out the action readout_key
+                targets[head_key],
+                pad_mask,
+                train,
+            )
+            loss += head_loss
+            metrics[head_key] = head_metrics
+        return loss, metrics
 
     @classmethod
     def create(

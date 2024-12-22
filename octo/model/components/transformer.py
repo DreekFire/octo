@@ -7,6 +7,7 @@ import jax.numpy as jnp
 
 from octo.model.components.base import TokenGroup
 from octo.utils.typing import Dtype, PRNGKey, Shape, Union
+from octo.utils.mha import MultiHeadDotProductAttention
 
 
 class AddPositionEmbs(nn.Module):
@@ -156,14 +157,14 @@ class Encoder1DBlock(nn.Module):
         # Attention block.
         assert inputs.ndim == 3, f"Expected (batch, seq, hidden) got {inputs.shape}"
         x = nn.LayerNorm(dtype=self.dtype)(inputs)
-        x = nn.MultiHeadDotProductAttention(
+        x = MultiHeadDotProductAttention(
             dtype=self.dtype,
             kernel_init=nn.initializers.xavier_uniform(),
             broadcast_dropout=False,
             deterministic=deterministic,
             dropout_rate=self.attention_dropout_rate,
             num_heads=self.num_heads,
-        )(x, x, mask=attention_mask)
+        )(x, x, mask=attention_mask, sampling=True)
         x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
         x = x + inputs
 

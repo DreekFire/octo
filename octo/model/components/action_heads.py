@@ -195,14 +195,14 @@ class ContinuousActionHead(nn.Module, ActionHead):
             f"but got shape {token_group.tokens.shape}"
         )
         if self.use_map:  # Multi-head attention pooling
-            embeddings = self.map_head(token_group, train=train)[:, :, 0]
+            embeddings = self.map_head(token_group, train=train)[..., 0, :]
         else:  # mean pooling
             embeddings = token_group.tokens.mean(axis=-2)
         # Now, embeddings is (batch_size, window_size, embedding_size)
 
         mean = self.mean_proj(embeddings)
         mean = rearrange(
-            mean, "b w (p a) -> b w p a", p=self.pred_horizon, a=self.action_dim
+            mean, "... w (p a) -> ... w p a", p=self.pred_horizon, a=self.action_dim
         )
         mean = jnp.tanh(mean / self.max_action) * self.max_action
         return mean
@@ -282,6 +282,8 @@ class DiscreteActionHead(nn.Module, ActionHead):
     action_dim: int = 7
     vocab_size: int = 256
     normalization_type: str = "uniform"
+    low: float = 0
+    high: float = 1
 
     def setup(self):
         total_output = self.pred_horizon * self.action_dim * self.vocab_size
@@ -305,6 +307,8 @@ class DiscreteActionHead(nn.Module, ActionHead):
         self.action_tokenizer = BinTokenizer(
             n_bins=self.vocab_size,
             bin_type=self.normalization_type,
+            low=self.low,
+            high=self.high,
         )
 
     def __call__(

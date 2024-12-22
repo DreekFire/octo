@@ -2,7 +2,7 @@
 from enum import Enum
 from fnmatch import fnmatch
 import logging
-from typing import Any, Dict, Mapping, Sequence, Tuple, Union
+from typing import Any, Dict, Mapping, Sequence, Tuple, Union, Optional
 
 import einops
 import flax
@@ -299,8 +299,9 @@ class BlockTransformer(nn.Module):
         tokens_for_prefix = sum(tokens_per_prefix_group)
         tokens_per_time_step = sum(tokens_per_timestep_group)
 
+        metadata_var = self.variable('metadata', 'num_cached_tokens', lambda: 0)
+        num_cached_tokens = metadata_var.value
         total_tokens = tokens_for_prefix + tokens_per_time_step * horizon
-        attention_mask = np.zeros((total_tokens, total_tokens), dtype=int)
 
         def get_token_metadata(i):
             if i < tokens_for_prefix:
@@ -312,16 +313,20 @@ class BlockTransformer(nn.Module):
             position = _get_position(i, tokens_per_timestep_group)
             return TokenMetadata.create(timestep_groups[position], timestep)
 
+        task_attention_rules = {"task_*": AttentionRule.CAUSAL}
+        num_cached_tokens = jax.core.concrete_or_error(int, num_cached_tokens, "Shape must be concrete during tracing")
+        token_metadata = [TokenMetadata(timestep=-1, name="task_cached", attention_rules=task_attention_rules) for _ in range(num_cached_tokens)] + [get_token_metadata(i) for i in range(total_tokens)]
+        if self.is_mutable_collection("metadata"):
+            metadata_var.value = tokens_for_prefix
+
+        attention_mask = np.zeros((total_tokens, len(token_metadata)), dtype=int)
+
         for i in range(total_tokens):  # Token attending
-            for j in range(total_tokens):  # Token being attended to
-                metadata_i = get_token_metadata(i)
-                metadata_j = get_token_metadata(j)
-                mask = int(metadata_i.should_attend_to(metadata_j))
+            for j in range(num_cached_tokens + total_tokens):  # Token being attended to
+                mask = int(token_metadata[num_cached_tokens + i].should_attend_to(token_metadata[j]))
                 attention_mask[i, j] = mask
 
-        pad_attention_mask = self.generate_pad_attention_mask(
-            prefix_groups, timestep_groups
-        )
+        pad_attention_mask = self.generate_pad_attention_mask(prefix_groups, timestep_groups)
         attention_mask = jnp.logical_and(attention_mask, pad_attention_mask)
         return attention_mask
 
@@ -349,14 +354,18 @@ class BlockTransformer(nn.Module):
             timestep_pad_mask,
             "batch horizon n_tokens -> batch (horizon n_tokens)",
         )
-        pad_mask = jnp.concatenate([prefix_pad_mask, timestep_pad_mask], axis=1)
+        pad_var = self.variable('metadata', 'pad_mask_flat', jnp.zeros, (batch_size, 0))
+        cached_pad_mask = pad_var.value
+        pad_mask = jnp.concatenate([cached_pad_mask, prefix_pad_mask, timestep_pad_mask], axis=1)
+        if self.is_mutable_collection("metadata"):
+            pad_var.value = jnp.concatenate([cached_pad_mask, prefix_pad_mask], axis=1)
         # pad_mask has shape (batch, total_tokens)
         pad_mask = jnp.broadcast_to(
             pad_mask[:, None, None, :],
             (
                 batch_size,
                 1,
-                pad_mask.shape[1],
+                pad_mask.shape[1] - cached_pad_mask.shape[1],
                 pad_mask.shape[1],
             ),
         )

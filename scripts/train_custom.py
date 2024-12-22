@@ -170,6 +170,7 @@ def main(_):
     )
 
     example_batch = next(train_data_iter)
+    breakpoint()
     logging.info(f"Batch size: {example_batch['action'].shape[0]}")
     logging.info(f"Number of devices: {jax.device_count()}")
     logging.info(

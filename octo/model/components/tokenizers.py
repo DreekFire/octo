@@ -8,6 +8,8 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.stats import norm
 
+import numpy as np
+
 from octo.model.components.base import TokenGroup
 from octo.model.components.transformer import MAPHead
 from octo.utils.spec import ModuleSpec
@@ -67,6 +69,76 @@ def regex_match(regex_keys, x):
 def regex_filter(regex_keys, xs):
     return list(filter(lambda x: regex_match(regex_keys, x), xs))
 
+class TubletTokenizer(nn.Module):
+    """Video tokenizer that encodes non-overlapping 3d slices of a video (jnp array of shape (T, H, W, C))
+        or multiple videos (*N, T, H, W, C) into tokens
+
+    Args:
+        obs_keys (Sequence[str]): Which keys to tokenize from the observations (must be empty if task_keys is non-empty, and vice versa)
+        task_keys (Sequence[str]): Which keys to tokenize from the tasks
+        shapes (Sequence[int]): Filter size (t, h, w)
+    """
+
+    obs_keys: Sequence[str] = ()
+    task_keys: Sequence[str] = ()
+    shapes: Sequence[int] = (2, 16, 16)
+    proper_pad_mask: bool = True
+
+    def __call__(
+        self,
+        observations,
+        tasks=None,
+        train: bool = True,
+    ):
+        assert self.obs_keys or self.task_keys, "Need to specify observation or task keys to tokenize."
+        assert not (self.obs_keys and self.task_keys), "Cannot tokenize both observations and tasks together"
+        if len(regex_filter(self.obs_keys, sorted(observations.keys()))) == 0 and (tasks is None or len(regex_filter(self.task_keys, sorted(tasks.keys())))) == 0:
+            logging.warning(
+                f"No observation or task inputs matching {self.obs_keys} or {self.task_keys} were found."
+                "Skipping tokenizer entirely."
+            )
+            assert self.proper_pad_mask, "Cannot skip unless using proper pad mask."
+            return None
+
+        tokenizer_inputs = []
+        keyset = self.obs_keys if self.obs_keys else self.task_keys
+        src = observations if self.obs_keys else tasks
+        shapes_array = np.array(self.shapes)
+        for o_key in keyset:
+            for key in filter(re.compile(o_key).match, sorted(src.keys())):
+                assert (
+                    len(src[key].shape) >= 4 # (..., T, H, W, C)
+                ), f"Requires video inputs but {key} has shape {src[key].shape}."
+                video_obs = src[key]
+                patches_shape = np.array(video_obs.shape)[-4:-1] // shapes_array
+                T, H, W = patches_shape * shapes_array
+                t, h, w = patches_shape
+                ft, fh, fw = self.shapes
+                video_obs = video_obs[..., :T, :H, :W, :]
+                tokenizer_inputs.append(src[key])
+        video_obs = jnp.concatenate(tokenizer_inputs, axis=-1)
+        patches_shape = np.array(video_obs.shape)[-4:-1] // shapes_array
+        T, H, W = patches_shape * shapes_array
+        t, h, w = patches_shape
+        ft, fh, fw = self.shapes
+        if len(video_obs.shape) > 4:
+            batch_size = video_obs.shape[:-4]
+        else:
+            batch_size = (1,)
+        video_obs = video_obs[..., :T, :H, :W, :]
+        patches = jnp.moveaxis(jnp.reshape(video_obs, (*batch_size, t, ft, h, fh, w, fw, video_obs.shape[-1])), (-6, -4), (-4, -3))
+        image_tokens = patches.reshape((*batch_size, t * h * w, ft * fh * fw * video_obs.shape[-1]))
+
+        if self.proper_pad_mask:
+            pad_mask = generate_proper_pad_mask(
+                image_tokens,
+                src.get("pad_mask_dict", None),
+                keyset,
+            )
+        else:
+            pad_mask = jnp.ones(image_tokens.shape[:-1])
+        return TokenGroup(image_tokens, pad_mask)
+    
 
 class ImageTokenizer(nn.Module):
     """Image tokenizer that encodes image stack into tokens with optional FiLM conditioning.

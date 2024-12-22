@@ -129,7 +129,7 @@ class OctoModel:
 
     @partial(jax.jit, static_argnames=("train",))
     def run_transformer(
-        self, observations: Data, tasks: Data, pad_mask: ArrayLike, train: bool = False
+        self, observations: Data, tasks: Data, pad_mask: ArrayLike, train: bool = False, cache_vars = None,
     ):
         """Runs the transformer, but does shape checking on the inputs.
 
@@ -149,14 +149,35 @@ class OctoModel:
         )
         _verify_shapes(tasks, "tasks", self.example_batch["task"], starting_dim=1)
 
-        return self.module.apply(
-            {"params": self.params},
-            observations,
-            tasks,
-            pad_mask,
-            train=train,
-            method="octo_transformer",
-        )
+        """
+        >>> cache_vars = {}
+        >>> outs = []
+        >>> for i in range(seq_len):
+                out, cache_vars = transformer.apply({'params': params, **cache_vars}, X[:, i:i+1], mask[:, :, i:i+1], mutable=['cache'])
+                outs.append(out)
+        >>> out2 = jnp.concatenate(outs, axis=1)
+        """
+
+        if cache_vars is not None:
+            return self.module.apply(
+                {"params": self.params, **cache_vars},
+                observations,
+                tasks,
+                pad_mask,
+                train=train,
+                method="octo_transformer",
+                mutable=["cache"],
+                sampling=True
+            )
+        else:
+            return self.module.apply(
+                {"params": self.params},
+                observations,
+                tasks,
+                pad_mask,
+                train=train,
+                method="octo_transformer",
+            )
 
     @partial(jax.jit, static_argnames=("train", "sample_shape", "argmax"))
     def sample_actions(
@@ -370,7 +391,7 @@ class OctoModel:
         module = OctoModule.create(**config["model"])
         rng = rng if rng is not None else jax.random.PRNGKey(0)
         example_batch = multihost_utils.process_allgather(example_batch)
-        example_batch = jax.tree_map(lambda x: x[:1], example_batch)
+        # example_batch = jax.tree_map(lambda x: x[:1], example_batch)
 
         init_args = (
             example_batch["observation"],
